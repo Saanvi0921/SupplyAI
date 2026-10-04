@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   CircleMarker,
@@ -13,6 +13,8 @@ import {
 
 import "leaflet/dist/leaflet.css";
 
+import logisticsHubData from "@/data/logistics-hubs.json";
+
 type Coordinate = [number, number];
 
 type SupplyMapProps = {
@@ -20,24 +22,378 @@ type SupplyMapProps = {
   destination: Coordinate;
   originName: string;
   destinationName: string;
+  transport: string;
 };
 
+type GroundRouteResponse = {
+  success: boolean;
+  route?: {
+    coordinates: Coordinate[];
+    distanceKm: number;
+    durationHours: number;
+  };
+};
+
+type RouteSegment = {
+  name: string;
+  type: "ground" | "ocean" | "air";
+  coordinates: Coordinate[];
+};
+
+type Port = {
+  name: string;
+  latitude: number;
+  longitude: number;
+};
+
+type HubType =
+  | "port"
+  | "airport"
+  | "warehouse"
+  | "intermodal";
+
+type LogisticsHub = {
+  name: string;
+  type: HubType;
+  latitude: number;
+  longitude: number;
+  modeled?: boolean;
+};
+
+/*
+ * Ports used by the ocean routing logic.
+ *
+ * Keeping this routing list separate means we are
+ * not changing the ocean routing behavior that
+ * already works.
+ */
+const PORTS: Port[] = [
+  {
+    name: "Port of Shenzhen",
+    latitude: 22.51,
+    longitude: 113.88,
+  },
+  {
+    name: "Port of Shanghai",
+    latitude: 31.23,
+    longitude: 121.49,
+  },
+  {
+    name: "Port of Singapore",
+    latitude: 1.264,
+    longitude: 103.84,
+  },
+  {
+    name: "Port of Tokyo",
+    latitude: 35.61,
+    longitude: 139.78,
+  },
+  {
+    name: "Port of Oakland",
+    latitude: 37.8,
+    longitude: -122.31,
+  },
+  {
+    name: "Port of Los Angeles",
+    latitude: 33.74,
+    longitude: -118.27,
+  },
+  {
+    name: "Port of Dublin",
+    latitude: 53.35,
+    longitude: -6.2,
+  },
+  {
+    name: "Port of Rotterdam",
+    latitude: 51.95,
+    longitude: 4.14,
+  },
+];
+
+/*
+ * Logistics network dots are now loaded from:
+ *
+ * src/data/logistics-hubs.json
+ *
+ * This lets us grow the network without filling
+ * this component with hundreds of coordinates.
+ */
+const LOGISTICS_HUBS =
+  logisticsHubData as LogisticsHub[];
+
+/*
+ * Modeled Pacific ocean corridor.
+ *
+ * The route is split at the International Date Line
+ * so Leaflet does not draw a giant line across the map.
+ */
+const PACIFIC_ASIA_SIDE: Coordinate[] = [
+  [22.51, 113.88],
+  [21.5, 118.0],
+  [20.5, 123.0],
+  [21.0, 130.0],
+  [24.0, 140.0],
+  [28.0, 150.0],
+  [32.0, 160.0],
+  [35.0, 170.0],
+  [37.0, 179.5],
+];
+
+const PACIFIC_AMERICA_SIDE: Coordinate[] = [
+  [37.0, -179.5],
+  [39.0, -170.0],
+  [41.0, -160.0],
+  [42.0, -150.0],
+  [42.0, -140.0],
+  [40.5, -130.0],
+  [38.5, -124.0],
+  [37.8, -122.31],
+];
+
+function distanceKm(
+  a: Coordinate,
+  b: Coordinate
+) {
+  const radius = 6371;
+
+  const lat1 =
+    (a[0] * Math.PI) / 180;
+
+  const lat2 =
+    (b[0] * Math.PI) / 180;
+
+  const deltaLat =
+    ((b[0] - a[0]) * Math.PI) / 180;
+
+  const deltaLon =
+    ((b[1] - a[1]) * Math.PI) / 180;
+
+  const value =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) *
+      Math.cos(lat2) *
+      Math.sin(deltaLon / 2) ** 2;
+
+  return (
+    radius *
+    2 *
+    Math.atan2(
+      Math.sqrt(value),
+      Math.sqrt(1 - value)
+    )
+  );
+}
+
+function findNearestPort(
+  location: Coordinate
+) {
+  return PORTS.reduce(
+    (nearest, port) => {
+      const currentDistance =
+        distanceKm(
+          location,
+          [
+            port.latitude,
+            port.longitude,
+          ]
+        );
+
+      const nearestDistance =
+        distanceKm(
+          location,
+          [
+            nearest.latitude,
+            nearest.longitude,
+          ]
+        );
+
+      return currentDistance <
+        nearestDistance
+        ? port
+        : nearest;
+    }
+  );
+}
+
 function FitRoute({
-  origin,
-  destination,
+  coordinates,
 }: {
-  origin: Coordinate;
-  destination: Coordinate;
+  coordinates: Coordinate[];
 }) {
   const map = useMap();
 
   useEffect(() => {
-    map.fitBounds([origin, destination], {
-      padding: [70, 70],
-    });
-  }, [map, origin, destination]);
+    if (coordinates.length < 2) {
+      return;
+    }
+
+    map.fitBounds(
+      coordinates,
+      {
+        padding: [60, 60],
+      }
+    );
+  }, [map, coordinates]);
 
   return null;
+}
+
+async function fetchGroundRoute(
+  from: Coordinate,
+  to: Coordinate
+): Promise<Coordinate[]> {
+  try {
+    if (
+      distanceKm(
+        from,
+        to
+      ) < 1
+    ) {
+      return [from, to];
+    }
+
+    const params =
+      new URLSearchParams({
+        startLat: String(from[0]),
+        startLon: String(from[1]),
+        endLat: String(to[0]),
+        endLon: String(to[1]),
+      });
+
+    const response =
+      await fetch(
+        `/api/route?${params.toString()}`
+      );
+
+    if (!response.ok) {
+      console.warn(
+        "Ground routing API could not calculate this leg."
+      );
+
+      return [from, to];
+    }
+
+    const data =
+      (await response.json()) as GroundRouteResponse;
+
+    if (
+      !data.success ||
+      !data.route
+        ?.coordinates
+        ?.length
+    ) {
+      return [from, to];
+    }
+
+    return data.route.coordinates;
+  } catch (error) {
+    console.error(
+      "Ground route error:",
+      error
+    );
+
+    return [from, to];
+  }
+}
+
+function createOceanRoutes(
+  departurePort: Port,
+  arrivalPort: Port
+): Coordinate[][] {
+  const departure: Coordinate = [
+    departurePort.latitude,
+    departurePort.longitude,
+  ];
+
+  const arrival: Coordinate = [
+    arrivalPort.latitude,
+    arrivalPort.longitude,
+  ];
+
+  const eastAsiaOrigin =
+    departurePort.longitude >
+      100 &&
+    departurePort.longitude <
+      150;
+
+  const californiaDestination =
+    arrivalPort.longitude <
+      -115 &&
+    arrivalPort.longitude >
+      -130;
+
+  if (
+    eastAsiaOrigin &&
+    californiaDestination
+  ) {
+    return [
+      [
+        departure,
+        ...PACIFIC_ASIA_SIDE,
+      ],
+      [
+        ...PACIFIC_AMERICA_SIDE,
+        arrival,
+      ],
+    ];
+  }
+
+  const californiaOrigin =
+    departurePort.longitude <
+      -115 &&
+    departurePort.longitude >
+      -130;
+
+  const eastAsiaDestination =
+    arrivalPort.longitude >
+      100 &&
+    arrivalPort.longitude <
+      150;
+
+  if (
+    californiaOrigin &&
+    eastAsiaDestination
+  ) {
+    return [
+      [
+        departure,
+        ...[
+          ...PACIFIC_AMERICA_SIDE,
+        ].reverse(),
+      ],
+      [
+        ...[
+          ...PACIFIC_ASIA_SIDE,
+        ].reverse(),
+        arrival,
+      ],
+    ];
+  }
+
+  return [
+    [
+      departure,
+      arrival,
+    ],
+  ];
+}
+
+function hubTypeLabel(
+  type: HubType
+) {
+  if (type === "port") {
+    return "PORT";
+  }
+
+  if (type === "airport") {
+    return "AIR CARGO";
+  }
+
+  if (type === "warehouse") {
+    return "WAREHOUSE / DISTRIBUTION";
+  }
+
+  return "INTERMODAL TRANSFER";
 }
 
 export default function SupplyMap({
@@ -45,16 +401,226 @@ export default function SupplyMap({
   destination,
   originName,
   destinationName,
+  transport,
 }: SupplyMapProps) {
-  const route: Coordinate[] = [origin, destination];
+  const [
+    segments,
+    setSegments,
+  ] =
+    useState<RouteSegment[]>(
+      []
+    );
+
+  const [
+    loadingRoute,
+    setLoadingRoute,
+  ] =
+    useState(true);
+
+  const departurePort =
+    useMemo(
+      () =>
+        findNearestPort(
+          origin
+        ),
+      [origin]
+    );
+
+  const arrivalPort =
+    useMemo(
+      () =>
+        findNearestPort(
+          destination
+        ),
+      [destination]
+    );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function buildRoute() {
+      setLoadingRoute(true);
+
+      /*
+       * GROUND
+       *
+       * Uses the working road
+       * routing API.
+       */
+      if (
+        transport ===
+        "Ground"
+      ) {
+        const groundRoute =
+          await fetchGroundRoute(
+            origin,
+            destination
+          );
+
+        if (cancelled) {
+          return;
+        }
+
+        setSegments([
+          {
+            name:
+              `${originName} → ` +
+              `${destinationName}`,
+
+            type: "ground",
+
+            coordinates:
+              groundRoute,
+          },
+        ]);
+
+        setLoadingRoute(
+          false
+        );
+
+        return;
+      }
+
+      /*
+       * OCEAN
+       *
+       * Ground
+       * →
+       * departure port
+       * →
+       * ocean
+       * →
+       * arrival port
+       * →
+       * ground
+       */
+      const departureCoordinate:
+        Coordinate = [
+        departurePort.latitude,
+        departurePort.longitude,
+      ];
+
+      const arrivalCoordinate:
+        Coordinate = [
+        arrivalPort.latitude,
+        arrivalPort.longitude,
+      ];
+
+      const [
+        originGroundRoute,
+        destinationGroundRoute,
+      ] =
+        await Promise.all([
+          fetchGroundRoute(
+            origin,
+            departureCoordinate
+          ),
+
+          fetchGroundRoute(
+            arrivalCoordinate,
+            destination
+          ),
+        ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      const oceanRoutes =
+        createOceanRoutes(
+          departurePort,
+          arrivalPort
+        );
+
+      const oceanSegments:
+        RouteSegment[] =
+        oceanRoutes.map(
+          (
+            coordinates,
+            index
+          ) => ({
+            name:
+              `${departurePort.name} → ` +
+              `${arrivalPort.name} ` +
+              `ocean segment ${
+                index + 1
+              }`,
+
+            type: "ocean",
+
+            coordinates,
+          })
+        );
+
+      setSegments([
+        {
+          name:
+            `${originName} → ` +
+            `${departurePort.name}`,
+
+          type: "ground",
+
+          coordinates:
+            originGroundRoute,
+        },
+
+        ...oceanSegments,
+
+        {
+          name:
+            `${arrivalPort.name} → ` +
+            `${destinationName}`,
+
+          type: "ground",
+
+          coordinates:
+            destinationGroundRoute,
+        },
+      ]);
+
+      setLoadingRoute(
+        false
+      );
+    }
+
+    buildRoute();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    origin,
+    destination,
+    originName,
+    destinationName,
+    transport,
+    departurePort,
+    arrivalPort,
+  ]);
+
+  const allCoordinates =
+    useMemo(
+      () =>
+        segments.flatMap(
+          (segment) =>
+            segment.coordinates
+        ),
+      [segments]
+    );
+
+  const showPorts =
+    transport !==
+    "Ground";
 
   return (
-    <div className="h-full min-h-[590px] w-full">
+    <div className="relative h-full min-h-[590px] w-full">
       <MapContainer
         center={[30, 0]}
         zoom={2}
         minZoom={2}
-        scrollWheelZoom={true}
+        scrollWheelZoom={
+          true
+        }
         className="h-full min-h-[590px] w-full"
       >
         <TileLayer
@@ -62,55 +628,291 @@ export default function SupplyMap({
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        <FitRoute
-          origin={origin}
-          destination={destination}
-        />
+        {allCoordinates.length >
+          1 && (
+          <FitRoute
+            coordinates={
+              allCoordinates
+            }
+          />
+        )}
 
-        <Polyline
-          positions={route}
-          pathOptions={{
-            color: "#0f172a",
-            weight: 4,
-            opacity: 0.9,
-            dashArray: "8 8",
-          }}
-        />
+        {/* LOGISTICS NETWORK */}
+
+        {LOGISTICS_HUBS.map(
+          (
+            hub,
+            index
+          ) => (
+            <CircleMarker
+              key={`${hub.name}-${index}`}
+              center={[
+                hub.latitude,
+                hub.longitude,
+              ]}
+              radius={
+                hub.type ===
+                  "port" ||
+                hub.type ===
+                  "airport"
+                  ? 4
+                  : 3
+              }
+              pathOptions={{
+                color:
+                  "#ffffff",
+
+                weight: 1,
+
+                fillColor:
+                  "#dc2626",
+
+                fillOpacity:
+                  0.82,
+              }}
+            >
+              <Popup>
+                <strong>
+                  {hub.name}
+                </strong>
+
+                <br />
+
+                {hubTypeLabel(
+                  hub.type
+                )}
+
+                {hub.modeled && (
+                  <>
+                    <br />
+
+                    Modeled
+                    SupplyAI
+                    network node
+                  </>
+                )}
+              </Popup>
+            </CircleMarker>
+          )
+        )}
+
+        {/* ACTIVE ROUTE */}
+
+        {segments.map(
+          (
+            segment,
+            index
+          ) => (
+            <Polyline
+              key={`${segment.name}-${index}`}
+              positions={
+                segment.coordinates
+              }
+              pathOptions={{
+                color:
+                  segment.type ===
+                  "ocean"
+                    ? "#2563eb"
+                    : segment.type ===
+                      "air"
+                    ? "#7c3aed"
+                    : "#0f172a",
+
+                weight:
+                  segment.type ===
+                  "ground"
+                    ? 5
+                    : 4,
+
+                opacity:
+                  0.92,
+
+                dashArray:
+                  segment.type ===
+                  "ocean"
+                    ? "9 7"
+                    : segment.type ===
+                      "air"
+                    ? "4 8"
+                    : undefined,
+              }}
+            />
+          )
+        )}
+
+        {/* ORIGIN */}
 
         <CircleMarker
           center={origin}
           radius={7}
           pathOptions={{
-            color: "#ffffff",
+            color:
+              "#ffffff",
+
             weight: 3,
-            fillColor: "#0f172a",
-            fillOpacity: 1,
+
+            fillColor:
+              "#0f172a",
+
+            fillOpacity:
+              1,
           }}
         >
           <Popup>
-            <strong>{originName}</strong>
+            <strong>
+              {originName}
+            </strong>
+
             <br />
+
             Shipment origin
           </Popup>
         </CircleMarker>
 
+        {/* ACTIVE PORTS */}
+
+        {showPorts && (
+          <>
+            <CircleMarker
+              center={[
+                departurePort.latitude,
+                departurePort.longitude,
+              ]}
+              radius={7}
+              pathOptions={{
+                color:
+                  "#ffffff",
+
+                weight: 3,
+
+                fillColor:
+                  "#2563eb",
+
+                fillOpacity:
+                  1,
+              }}
+            >
+              <Popup>
+                <strong>
+                  {
+                    departurePort.name
+                  }
+                </strong>
+
+                <br />
+
+                ACTIVE DEPARTURE
+                PORT
+
+                <br />
+
+                Ground → Ocean
+                transfer
+              </Popup>
+            </CircleMarker>
+
+            <CircleMarker
+              center={[
+                arrivalPort.latitude,
+                arrivalPort.longitude,
+              ]}
+              radius={7}
+              pathOptions={{
+                color:
+                  "#ffffff",
+
+                weight: 3,
+
+                fillColor:
+                  "#2563eb",
+
+                fillOpacity:
+                  1,
+              }}
+            >
+              <Popup>
+                <strong>
+                  {
+                    arrivalPort.name
+                  }
+                </strong>
+
+                <br />
+
+                ACTIVE ARRIVAL
+                PORT
+
+                <br />
+
+                Ocean → Ground
+                transfer
+              </Popup>
+            </CircleMarker>
+          </>
+        )}
+
+        {/* DESTINATION */}
+
         <CircleMarker
-          center={destination}
+          center={
+            destination
+          }
           radius={7}
           pathOptions={{
-            color: "#ffffff",
+            color:
+              "#ffffff",
+
             weight: 3,
-            fillColor: "#0f172a",
-            fillOpacity: 1,
+
+            fillColor:
+              "#0f172a",
+
+            fillOpacity:
+              1,
           }}
         >
           <Popup>
-            <strong>{destinationName}</strong>
+            <strong>
+              {destinationName}
+            </strong>
+
             <br />
+
             Final destination
           </Popup>
         </CircleMarker>
       </MapContainer>
+
+      {/* NETWORK LEGEND */}
+
+      <div className="pointer-events-none absolute bottom-4 left-4 z-[1000] border border-slate-200 bg-white px-3 py-2 shadow-sm">
+        {loadingRoute ? (
+          <p className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-600">
+            Calculating
+            logistics route...
+          </p>
+        ) : (
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-red-600" />
+
+              <span className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-700">
+                Logistics
+                Network
+              </span>
+            </div>
+
+            <p className="mt-1 text-[8px] font-semibold uppercase tracking-[0.08em] text-slate-400">
+              {
+                LOGISTICS_HUBS.length
+              }{" "}
+              nodes · Ports · Air
+              Cargo · Warehouses ·
+              Intermodal
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

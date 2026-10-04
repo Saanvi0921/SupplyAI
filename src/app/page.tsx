@@ -33,7 +33,11 @@ type GeocodedLocation = {
   longitude: number;
 };
 
-type TransportMode = "Ocean" | "Air" | "Ground";
+type TransportMode =
+  | "Ocean"
+  | "Air"
+  | "Ground"
+  | "Multimodal";
 
 type ShipmentEstimate = {
   directDistanceKm: number;
@@ -47,9 +51,11 @@ type ShipmentEstimate = {
 type AlternativeOption = {
   name: string;
   description: string;
+  modes: TransportMode[];
   etaDays: number;
   cost: number;
   risk: number;
+  score?: number;
 };
 
 type PanelName =
@@ -84,8 +90,8 @@ function calculateDistanceKm(
   const a =
     Math.sin(deltaLat / 2) ** 2 +
     Math.cos(lat1) *
-      Math.cos(lat2) *
-      Math.sin(deltaLon / 2) ** 2;
+    Math.cos(lat2) *
+    Math.sin(deltaLon / 2) ** 2;
 
   const c =
     2 *
@@ -136,12 +142,12 @@ function calculateShipmentEstimate(
     },
   };
 
-  const mode =
-    transport === "Air" ||
-    transport === "Ground" ||
-    transport === "Ocean"
-      ? (transport as TransportMode)
-      : "Ocean";
+  const mode: "Ocean" | "Air" | "Ground" =
+    transport === "Air"
+      ? "Air"
+      : transport === "Ground"
+        ? "Ground"
+        : "Ocean";
 
   const profile = profiles[mode];
 
@@ -214,6 +220,19 @@ function calculateAlternativeOptions(
   weatherRisk: number,
   disruptionActive: boolean
 ): AlternativeOption[] {
+  const distance = calculateDistanceKm(
+    origin,
+    destination
+  );
+
+  const ground = calculateShipmentEstimate(
+    origin,
+    destination,
+    "Ground",
+    weatherRisk,
+    false
+  );
+
   const ocean = calculateShipmentEstimate(
     origin,
     destination,
@@ -230,105 +249,244 @@ function calculateAlternativeOptions(
     false
   );
 
-  const contingencyEta =
-    ocean.etaDays + (disruptionActive ? 2 : 3);
+  const options: AlternativeOption[] = [];
 
-  const contingencyCost =
-    Math.round(
-      (ocean.estimatedCost *
-        (disruptionActive ? 1.18 : 1.12)) /
-        10
-    ) * 10;
+  /*
+   * SHORT / REGIONAL
+   *
+   * Ground is normally the most sensible option
+   * when the shipment is relatively close.
+   */
+  if (distance <= 5000) {
+    options.push({
+      name: "Ground Direct",
+      description:
+        "Direct road freight with minimal transfers",
+      modes: ["Ground"],
+      etaDays: ground.etaDays,
+      cost: ground.estimatedCost,
+      risk: ground.overallRisk,
+    });
 
-  if (disruptionActive) {
-    return [
-      {
-        name: "Current Ocean Route",
+    /*
+     * Ground + Air is useful for longer regional
+     * shipments where speed matters.
+     */
+    if (distance >= 500) {
+      options.push({
+        name: "Ground + Air",
         description:
-          "Existing route impacted by simulated disruption",
-        etaDays: ocean.etaDays + 5,
+          "Road transfer with expedited air freight",
+        modes: ["Ground", "Air"],
+        etaDays: Math.max(
+          2,
+          Math.ceil(air.etaDays + 1)
+        ),
         cost:
           Math.round(
-            (ocean.estimatedCost * 1.25) / 10
+            (air.estimatedCost * 1.08) / 10
           ) * 10,
-        risk: 72,
-      },
-      {
-        name: "Air Expedite",
-        description:
-          "Fastest response to active disruption",
-        etaDays: air.etaDays,
-        cost: air.estimatedCost,
-        risk: Math.max(
-          14,
-          Math.min(28, air.overallRisk)
+        risk: Math.min(
+          100,
+          Math.round(
+            air.overallRisk + 3
+          )
         ),
-      },
-      {
-        name: "Ocean Contingency",
-        description:
-          "Alternate lower-exposure ocean routing",
-        etaDays: contingencyEta,
-        cost: contingencyCost,
-        risk: 24,
-      },
-    ];
+      });
+    }
   }
 
-  return [
-    {
-      name: "Ocean Standard",
+  /*
+   * LONG-DISTANCE / INTERNATIONAL
+   *
+   * Ocean and Air become valid options.
+   */
+  if (distance >= 300) {
+    options.push({
+      name: "Ground + Ocean",
       description:
-        "Cost-efficient standard freight routing",
-      etaDays: ocean.etaDays,
-      cost: ocean.estimatedCost,
-      risk: ocean.overallRisk,
-    },
-    {
-      name: "Air Expedite",
+        "Road transfers connected by ocean freight",
+      modes: ["Ground", "Ocean"],
+      etaDays:
+        ocean.etaDays +
+        (disruptionActive ? 4 : 0),
+      cost:
+        Math.round(
+          (ocean.estimatedCost *
+            (disruptionActive ? 1.18 : 1)) /
+          10
+        ) * 10,
+      risk: disruptionActive
+        ? Math.min(
+          100,
+          ocean.overallRisk + 35
+        )
+        : ocean.overallRisk,
+    });
+
+    options.push({
+      name: "Ground + Air",
       description:
-        "Fastest delivery with higher freight cost",
+        "Road transfers connected by air freight",
+      modes: ["Ground", "Air"],
       etaDays: air.etaDays,
       cost: air.estimatedCost,
-      risk: air.overallRisk,
-    },
-    {
-      name: "Ocean Contingency",
-      description:
-        "Lower-exposure alternative routing",
-      etaDays: contingencyEta,
-      cost: contingencyCost,
       risk: Math.max(
         8,
-        ocean.overallRisk - 9
+        air.overallRisk -
+        (disruptionActive ? 2 : 0)
       ),
-    },
-  ];
+    });
+  }
+
+  /*
+   * ADAPTIVE THREE-MODE OPTION
+   *
+   * Only offer this on very long routes.
+   * It can use Ground + Ocean + Air.
+   */
+  if (distance >= 5000) {
+    const multimodalEta = Math.max(
+      air.etaDays + 2,
+      Math.round(
+        ocean.etaDays * 0.55 +
+        air.etaDays * 0.45
+      )
+    );
+
+    const multimodalCost =
+      Math.round(
+        ((ocean.estimatedCost * 0.55 +
+          air.estimatedCost * 0.45 +
+          900) *
+          (disruptionActive ? 1.05 : 1)) /
+        10
+      ) * 10;
+
+    const multimodalRisk = Math.max(
+      8,
+      Math.round(
+        ocean.overallRisk * 0.4 +
+        air.overallRisk * 0.4 +
+        12
+      )
+    );
+
+    options.push({
+      name: "Adaptive Multimodal",
+      description:
+        "Ground, ocean, and air segments balanced for cost, time, and risk",
+      modes: [
+        "Ground",
+        "Ocean",
+        "Air",
+      ],
+      etaDays: multimodalEta,
+      cost: multimodalCost,
+      risk: multimodalRisk,
+    });
+  }
+
+  return options;
 }
 
 function chooseRecommendedOption(
   options: AlternativeOption[],
   disruptionActive: boolean
 ) {
-  return options.reduce((best, current) => {
-    const bestScore =
-      best.risk *
-        (disruptionActive ? 0.65 : 0.5) +
-      best.etaDays * 0.25 +
-      (best.cost / 1000) *
-        (disruptionActive ? 0.1 : 0.25);
+  if (options.length === 0) {
+    throw new Error(
+      "No feasible shipment options were generated."
+    );
+  }
 
-    const currentScore =
-      current.risk *
-        (disruptionActive ? 0.65 : 0.5) +
-      current.etaDays * 0.25 +
-      (current.cost / 1000) *
-        (disruptionActive ? 0.1 : 0.25);
+  const minCost = Math.min(
+    ...options.map((option) => option.cost)
+  );
 
-    return currentScore < bestScore
-      ? current
-      : best;
-  });
+  const maxCost = Math.max(
+    ...options.map((option) => option.cost)
+  );
+
+  const minEta = Math.min(
+    ...options.map((option) => option.etaDays)
+  );
+
+  const maxEta = Math.max(
+    ...options.map((option) => option.etaDays)
+  );
+
+  const minRisk = Math.min(
+    ...options.map((option) => option.risk)
+  );
+
+  const maxRisk = Math.max(
+    ...options.map((option) => option.risk)
+  );
+
+  function normalize(
+    value: number,
+    min: number,
+    max: number
+  ) {
+    if (max === min) {
+      return 0;
+    }
+
+    return (value - min) / (max - min);
+  }
+
+  const costWeight = disruptionActive
+    ? 0.25
+    : 0.4;
+
+  const timeWeight = disruptionActive
+    ? 0.3
+    : 0.35;
+
+  const riskWeight = disruptionActive
+    ? 0.45
+    : 0.25;
+
+  const scoredOptions = options.map(
+    (option) => {
+      const costScore = normalize(
+        option.cost,
+        minCost,
+        maxCost
+      );
+
+      const timeScore = normalize(
+        option.etaDays,
+        minEta,
+        maxEta
+      );
+
+      const riskScore = normalize(
+        option.risk,
+        minRisk,
+        maxRisk
+      );
+
+      const score =
+        costScore * costWeight +
+        timeScore * timeWeight +
+        riskScore * riskWeight;
+
+      return {
+        ...option,
+        score,
+      };
+    }
+  );
+
+  return scoredOptions.reduce(
+    (best, current) =>
+      (current.score ?? 1) <
+        (best.score ?? 1)
+        ? current
+        : best
+  );
 }
 
 function formatCurrency(value: number) {
@@ -369,11 +527,10 @@ const Stat = ({
 
     <div className="mt-2 flex items-baseline gap-2">
       <span
-        className={`text-2xl font-semibold tracking-tight ${
-          warning
-            ? "text-amber-600"
-            : "text-slate-950"
-        }`}
+        className={`text-2xl font-semibold tracking-tight ${warning
+          ? "text-amber-600"
+          : "text-slate-950"
+          }`}
       >
         {value}
       </span>
@@ -403,19 +560,19 @@ function RiskIntelligenceView({
   const routeRisk = disrupted
     ? 78
     : Math.min(
-        100,
-        Math.max(12, overallRisk)
-      );
+      100,
+      Math.max(12, overallRisk)
+    );
 
   const cargoLower = cargo.toLowerCase();
 
   const cargoRisk =
     cargoLower.includes("electronics") ||
-    cargoLower.includes("medical") ||
-    cargoLower.includes("pharma")
+      cargoLower.includes("medical") ||
+      cargoLower.includes("pharma")
       ? 24
       : cargoLower.includes("food") ||
-          cargoLower.includes("perishable")
+        cargoLower.includes("perishable")
         ? 32
         : 16;
 
@@ -837,7 +994,7 @@ export default function Home() {
       ) {
         throw new Error(
           originData.error ||
-            "Could not locate shipment origin."
+          "Could not locate shipment origin."
         );
       }
 
@@ -847,7 +1004,7 @@ export default function Home() {
       ) {
         throw new Error(
           destinationData.error ||
-            "Could not locate shipment destination."
+          "Could not locate shipment destination."
         );
       }
 
@@ -857,6 +1014,37 @@ export default function Home() {
       const newDestination =
         destinationData.location as GeocodedLocation;
 
+      const directDistanceKm = calculateDistanceKm(
+        newOrigin,
+        newDestination
+      );
+
+      // Prevent meaningless same-location shipments.
+      if (directDistanceKm < 1) {
+        throw new Error(
+          "Origin and destination cannot be the same location. Please enter two different locations."
+        );
+      }
+
+      // Ground-only freight should not be used for extremely long
+      // international routes that would require another transport mode.
+      if (
+        transport === "Ground" &&
+        directDistanceKm > 5000
+      ) {
+        throw new Error(
+          "Ground-only route unavailable. This shipment requires multiple transport modes. Please choose Ocean, Air, or Adaptive Multimodal."        );
+      }
+
+      // Ocean freight does not make sense for short/local shipments.
+      if (
+        transport === "Ocean" &&
+        directDistanceKm < 300
+      ) {
+        throw new Error(
+          "Ocean freight is not suitable for this short-distance shipment. Please choose Ground freight."
+        );
+      }
       const weatherResponse = await fetch(
         `/api/weather?lat=${newOrigin.latitude}&lon=${newOrigin.longitude}`
       );
@@ -876,7 +1064,7 @@ export default function Home() {
       ) {
         throw new Error(
           weatherData.error ||
-            "Weather analysis failed."
+          "Weather analysis failed."
         );
       }
 
@@ -887,8 +1075,27 @@ export default function Home() {
       setActiveOrigin(origin);
       setActiveDestination(destination);
       setActiveCargo(cargo);
-      setActiveTransport(transport);
+      if (transport === "Multimodal") {
+        const adaptiveOptions =
+          calculateAlternativeOptions(
+            newOrigin,
+            newDestination,
+            weatherData.weather.riskScore ?? 0,
+            false
+          );
 
+        const adaptiveRecommendation =
+          chooseRecommendedOption(
+            adaptiveOptions,
+            false
+          );
+
+        setActiveTransport(
+          adaptiveRecommendation.name
+        );
+      } else {
+        setActiveTransport(transport);
+      }
       setDisruptionActive(false);
       setMapView("route");
       setOpenPanel(null);
@@ -969,45 +1176,65 @@ export default function Home() {
               </div>
             </div>
 
-            <nav className="hidden items-center gap-6 text-xs font-semibold text-slate-500 lg:flex">
-              <span className="text-slate-950">
+            <nav className="hidden items-center gap-6 text-xs font-semibold lg:flex">
+              <button
+                type="button"
+                onClick={() => {
+                  setMapView("route");
+                  setOpenPanel(null);
+                }}
+                className={`transition hover:text-slate-950 ${mapView === "route"
+                  ? "text-slate-950"
+                  : "text-slate-500"
+                  }`}
+              >
                 Live Network
-              </span>
-              <span>Shipments</span>
-              <span>Risk Monitor</span>
-              <span>Suppliers</span>
-            </nav>
-          </div>
+              </button>
 
-          <div className="flex items-center gap-3">
-            <div className="mr-2 hidden items-center gap-2 text-xs font-medium text-slate-500 sm:flex">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  interventionRequired
+              <button
+                type="button"
+                onClick={() => {
+                  setMapView("risk");
+                  setOpenPanel("risk");
+                }}
+                className={`transition hover:text-slate-950 ${mapView === "risk"
+                  ? "text-slate-950"
+                  : "text-slate-500"
+                  }`}
+              >
+                Risk Monitor
+              </button>
+            </nav>
+
+            <div className="flex items-center gap-3">
+              <div className="mr-2 hidden items-center gap-2 text-xs font-medium text-slate-500 sm:flex">
+                <span
+                  className={`h-2 w-2 rounded-full ${interventionRequired
                     ? "bg-red-500"
                     : "bg-emerald-500"
-                }`}
-              />
-              {interventionRequired
-                ? "NETWORK ALERT"
-                : "NETWORK NORMAL"}
+                    }`}
+                />
+                {interventionRequired
+                  ? "NETWORK ALERT"
+                  : "NETWORK NORMAL"}
+              </div>
+
+              <button
+                onClick={() =>
+                  setShowNewShipment(true)
+                }
+                className="bg-slate-950 px-4 py-2 text-xs font-bold uppercase tracking-wide text-white transition hover:bg-slate-800"
+              >
+                + New Shipment
+              </button>
+
+              <button
+                onClick={resetDemo}
+                className="border border-slate-300 bg-white px-4 py-2 text-xs font-bold uppercase tracking-wide transition hover:bg-slate-100"
+              >
+                Reset Demo
+              </button>
             </div>
-
-            <button
-              onClick={() =>
-                setShowNewShipment(true)
-              }
-              className="bg-slate-950 px-4 py-2 text-xs font-bold uppercase tracking-wide text-white transition hover:bg-slate-800"
-            >
-              + New Shipment
-            </button>
-
-            <button
-              onClick={resetDemo}
-              className="border border-slate-300 bg-white px-4 py-2 text-xs font-bold uppercase tracking-wide transition hover:bg-slate-100"
-            >
-              Reset Demo
-            </button>
           </div>
         </div>
       </header>
@@ -1110,6 +1337,9 @@ export default function Home() {
                   <option value="Ground">
                     Ground freight
                   </option>
+                  <option value="Multimodal">
+                    Adaptive Multimodal
+                  </option>
                 </select>
               </div>
             </div>
@@ -1168,14 +1398,13 @@ export default function Home() {
           </div>
 
           <span
-            className={`border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] ${
-              interventionRequired
-                ? "border-red-200 bg-red-50 text-red-700"
-                : costReview ||
-                    estimate.overallRisk >= 40
-                  ? "border-amber-200 bg-amber-50 text-amber-700"
-                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
-            }`}
+            className={`border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] ${interventionRequired
+              ? "border-red-200 bg-red-50 text-red-700"
+              : costReview ||
+                estimate.overallRisk >= 40
+                ? "border-amber-200 bg-amber-50 text-amber-700"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700"
+              }`}
           >
             {shipmentStatus}
           </span>
@@ -1186,46 +1415,44 @@ export default function Home() {
 
       {(interventionRequired ||
         costReview) && (
-        <section
-          className={`border-b px-7 py-4 ${
-            interventionRequired
+          <section
+            className={`border-b px-7 py-4 ${interventionRequired
               ? "border-red-200 bg-red-50"
               : "border-amber-200 bg-amber-50"
-          }`}
-        >
-          <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
-            <div>
-              <p
-                className={`text-[10px] font-bold uppercase tracking-[0.18em] ${
-                  interventionRequired
+              }`}
+          >
+            <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
+              <div>
+                <p
+                  className={`text-[10px] font-bold uppercase tracking-[0.18em] ${interventionRequired
                     ? "text-red-700"
                     : "text-amber-700"
-                }`}
-              >
-                {interventionRequired
-                  ? "SupplyAI · Intervention Recommended"
-                  : "SupplyAI · Cost Review"}
-              </p>
+                    }`}
+                >
+                  {interventionRequired
+                    ? "SupplyAI · Intervention Recommended"
+                    : "SupplyAI · Cost Review"}
+                </p>
 
-              <p className="mt-1 text-sm font-semibold">
-                {disruptionActive
-                  ? `SupplyAI recommends ${recommendedOption.name}. Options have been re-ranked after the simulated disruption.`
-                  : `Estimated shipment cost exceeds the ${formatCurrency(
+                <p className="mt-1 text-sm font-semibold">
+                  {disruptionActive
+                    ? `SupplyAI recommends ${recommendedOption.name}. Options have been re-ranked after the simulated disruption.`
+                    : `Estimated shipment cost exceeds the ${formatCurrency(
                       COST_REVIEW_THRESHOLD
                     )} review threshold.`}
-              </p>
-            </div>
+                </p>
+              </div>
 
-            <div className="text-xs font-semibold text-slate-600">
-              Risk {estimate.overallRisk}% ·{" "}
-              {estimate.etaDays} days ·{" "}
-              {formatCurrency(
-                estimate.estimatedCost
-              )}
+              <div className="text-xs font-semibold text-slate-600">
+                Risk {estimate.overallRisk}% ·{" "}
+                {estimate.etaDays} days ·{" "}
+                {formatCurrency(
+                  estimate.estimatedCost
+                )}
+              </div>
             </div>
-          </div>
-        </section>
-      )}
+          </section>
+        )}
 
       {/* KPI STRIP */}
 
@@ -1284,11 +1511,10 @@ export default function Home() {
               onClick={() =>
                 setMapView("route")
               }
-              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${
-                mapView === "route"
-                  ? "bg-slate-950 text-white"
-                  : "bg-white text-slate-500 hover:bg-slate-100"
-              }`}
+              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${mapView === "route"
+                ? "bg-slate-950 text-white"
+                : "bg-white text-slate-500 hover:bg-slate-100"
+                }`}
             >
               Route
             </button>
@@ -1297,13 +1523,12 @@ export default function Home() {
               onClick={() =>
                 setMapView("risk")
               }
-              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${
-                mapView === "risk"
-                  ? disruptionActive
-                    ? "bg-red-600 text-white"
-                    : "bg-slate-950 text-white"
-                  : "bg-white text-slate-500 hover:bg-slate-100"
-              }`}
+              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${mapView === "risk"
+                ? disruptionActive
+                  ? "bg-red-600 text-white"
+                  : "bg-slate-950 text-white"
+                : "bg-white text-slate-500 hover:bg-slate-100"
+                }`}
             >
               Risk
             </button>
@@ -1340,20 +1565,18 @@ export default function Home() {
                     destinationLocation.longitude,
                   ]}
                   originName={activeOrigin}
-                  destinationName={
-                    activeDestination
-                  }
+                  destinationName={activeDestination}
+                  transport={activeTransport}
                 />
               </div>
 
               <div className="absolute bottom-5 left-6 z-[1000] border border-slate-300 bg-white px-4 py-3 shadow-sm">
                 <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide">
                   <span
-                    className={`h-2 w-2 rounded-full ${
-                      disruptionActive
-                        ? "bg-red-500"
-                        : "bg-emerald-500"
-                    }`}
+                    className={`h-2 w-2 rounded-full ${disruptionActive
+                      ? "bg-red-500"
+                      : "bg-emerald-500"
+                      }`}
                   />
 
                   {disruptionActive
@@ -1637,7 +1860,7 @@ export default function Home() {
 
               <span className="text-xl font-light text-slate-400">
                 {openPanel ===
-                "alternatives"
+                  "alternatives"
                   ? "−"
                   : "+"}
               </span>
@@ -1645,69 +1868,68 @@ export default function Home() {
 
             {openPanel ===
               "alternatives" && (
-              <div className="border-t border-slate-200 bg-white">
-                {alternativeOptions.map(
-                  (option) => {
-                    const recommended =
-                      option.name ===
-                      recommendedOption.name;
+                <div className="border-t border-slate-200 bg-white">
+                  {alternativeOptions.map(
+                    (option) => {
+                      const recommended =
+                        option.name ===
+                        recommendedOption.name;
 
-                    return (
-                      <div
-                        key={option.name}
-                        className={`border-b border-slate-100 p-4 last:border-b-0 ${
-                          recommended
+                      return (
+                        <div
+                          key={option.name}
+                          className={`border-b border-slate-100 p-4 last:border-b-0 ${recommended
                             ? "border-l-4 border-l-emerald-500 bg-emerald-50/60"
                             : "border-l-4 border-l-transparent"
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div>
-                            {recommended && (
-                              <p className="mb-1 text-[8px] font-black uppercase tracking-[0.14em] text-emerald-700">
-                                Recommended
+                            }`}
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              {recommended && (
+                                <p className="mb-1 text-[8px] font-black uppercase tracking-[0.14em] text-emerald-700">
+                                  Recommended
+                                </p>
+                              )}
+
+                              <p className="text-xs font-bold">
+                                {option.name}
                               </p>
-                            )}
 
-                            <p className="text-xs font-bold">
-                              {option.name}
-                            </p>
+                              <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                                {
+                                  option.description
+                                }
+                              </p>
+                            </div>
 
-                            <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                              {
-                                option.description
-                              }
+                            <p
+                              className={`text-xs font-black ${riskColor(
+                                option.risk
+                              )}`}
+                            >
+                              {option.risk}%
                             </p>
                           </div>
 
-                          <p
-                            className={`text-xs font-black ${riskColor(
-                              option.risk
-                            )}`}
-                          >
-                            {option.risk}%
-                          </p>
+                          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[10px] font-semibold text-slate-600">
+                            <span>
+                              {option.etaDays} days
+                            </span>
+                            <span>
+                              {formatCurrency(
+                                option.cost
+                              )}
+                            </span>
+                            <span>
+                              {option.risk}% risk
+                            </span>
+                          </div>
                         </div>
-
-                        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[10px] font-semibold text-slate-600">
-                          <span>
-                            {option.etaDays} days
-                          </span>
-                          <span>
-                            {formatCurrency(
-                              option.cost
-                            )}
-                          </span>
-                          <span>
-                            {option.risk}% risk
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  }
-                )}
-              </div>
-            )}
+                      );
+                    }
+                  )}
+                </div>
+              )}
           </div>
 
           {/* AGENT ACTIVITY */}
@@ -1815,11 +2037,10 @@ export default function Home() {
                   setMapView("risk");
                 }
               }}
-              className={`w-full px-4 py-3 text-xs font-black uppercase tracking-[0.1em] text-white transition ${
-                disruptionActive
-                  ? "bg-red-700 hover:bg-red-800"
-                  : "bg-slate-950 hover:bg-slate-800"
-              }`}
+              className={`w-full px-4 py-3 text-xs font-black uppercase tracking-[0.1em] text-white transition ${disruptionActive
+                ? "bg-red-700 hover:bg-red-800"
+                : "bg-slate-950 hover:bg-slate-800"
+                }`}
             >
               {disruptionActive
                 ? "Clear Demo Disruption"
