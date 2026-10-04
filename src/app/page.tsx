@@ -618,7 +618,7 @@ function RiskIntelligenceView({
       label: "Journey Weather Risk",
       value: weatherRisk,
       description: weather
-        ? `${weather.points.length} live weather checkpoints across the shipment corridor`
+        ? `${weather.points?.length ?? 0} live weather checkpoints across the shipment corridor`
         : "Analyze a shipment to load live corridor weather",
     },
     {
@@ -828,10 +828,7 @@ function RiskIntelligenceView({
                   </p>
 
                   <p className="mt-1 text-lg font-black">
-                    {
-                      weather.points
-                        .length
-                    }
+                    {weather.points?.length ?? 0}
                   </p>
                 </div>
 
@@ -1607,10 +1604,10 @@ export default function Home() {
 
               <span
                 className={`border px-2 py-1 text-[8px] font-black uppercase tracking-[0.1em] ${interventionRequired
-                    ? "border-red-200 bg-red-50 text-red-700"
-                    : costReview || estimate.overallRisk >= 40
-                      ? "border-amber-200 bg-amber-50 text-amber-700"
-                      : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : costReview || estimate.overallRisk >= 40
+                    ? "border-amber-200 bg-amber-50 text-amber-700"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-700"
                   }`}
               >
                 {shipmentStatus}
@@ -1642,8 +1639,8 @@ export default function Home() {
 
               <p
                 className={`mt-0.5 text-base font-black ${costReview
-                    ? "text-amber-600"
-                    : "text-slate-950"
+                  ? "text-amber-600"
+                  : "text-slate-950"
                   }`}
               >
                 {formatCurrency(estimate.estimatedCost)}
@@ -1681,8 +1678,8 @@ export default function Home() {
 
               <p
                 className={`mt-0.5 text-base font-black ${interventionRequired
-                    ? "text-red-600"
-                    : "text-slate-950"
+                  ? "text-red-600"
+                  : "text-slate-950"
                   }`}
               >
                 {networkStatus}
@@ -1703,8 +1700,8 @@ export default function Home() {
       {(interventionRequired || costReview) && (
         <section
           className={`border-b px-7 py-2 ${interventionRequired
-              ? "border-red-200 bg-red-50"
-              : "border-amber-200 bg-amber-50"
+            ? "border-red-200 bg-red-50"
+            : "border-amber-200 bg-amber-50"
             }`}
         >
           <div className="flex items-center justify-between gap-4">
@@ -1998,11 +1995,8 @@ export default function Home() {
                             Live Checkpoints
                           </p>
 
-                          <p className="mt-1 text-xl font-black text-slate-950">
-                            {
-                              weather.points
-                                .length
-                            }
+                          <p className="mt-1 text-lg font-black">
+                            {weather.points?.length ?? 0}
                           </p>
                         </div>
                       </div>
