@@ -14,15 +14,32 @@ const SupplyMap = dynamic(() => import("@/components/SupplyMap"), {
   ),
 });
 
-type WeatherResult = {
+type WeatherRiskLevel =
+  | "LOW"
+  | "MEDIUM"
+  | "HIGH";
+
+type JourneyWeatherPoint = {
   latitude: number;
   longitude: number;
   temperature: number;
   precipitation: number;
   windSpeed: number;
   weatherCode: number;
-  riskLevel: "LOW" | "MEDIUM" | "HIGH";
+  riskLevel: WeatherRiskLevel;
   riskScore: number;
+  summary: string;
+  pointNumber: number;
+  progressPercent: number;
+};
+
+type JourneyWeatherResult = {
+  riskLevel: WeatherRiskLevel;
+  riskScore: number;
+  averageRiskScore: number;
+  highestRiskScore: number;
+  highestRiskPoint: JourneyWeatherPoint;
+  points: JourneyWeatherPoint[];
   summary: string;
 };
 
@@ -387,7 +404,12 @@ function calculateAlternativeOptions(
     });
   }
 
-  return options;
+  return options.filter(
+    (option, index, allOptions) =>
+      allOptions.findIndex(
+        (candidate) => candidate.name === option.name
+      ) === index
+  );
 }
 
 function chooseRecommendedOption(
@@ -544,19 +566,22 @@ const Stat = ({
 
 function RiskIntelligenceView({
   overallRisk,
-  weatherRisk,
+  weather,
   cargo,
   transport,
   disrupted,
   recommendation,
 }: {
   overallRisk: number;
-  weatherRisk: number;
+  weather: JourneyWeatherResult | null;
   cargo: string;
   transport: string;
   disrupted: boolean;
   recommendation: string;
 }) {
+  const weatherRisk =
+    weather?.riskScore ?? 0;
+
   const routeRisk = disrupted
     ? 78
     : Math.min(
@@ -564,7 +589,8 @@ function RiskIntelligenceView({
       Math.max(12, overallRisk)
     );
 
-  const cargoLower = cargo.toLowerCase();
+  const cargoLower =
+    cargo.toLowerCase();
 
   const cargoRisk =
     cargoLower.includes("electronics") ||
@@ -576,20 +602,24 @@ function RiskIntelligenceView({
         ? 32
         : 16;
 
+  const transportLower =
+    transport.toLowerCase();
+
   const operationalRisk = disrupted
     ? 68
-    : transport === "Ocean"
-      ? 16
-      : transport === "Air"
-        ? 12
+    : transportLower.includes("air")
+      ? 12
+      : transportLower.includes("ocean")
+        ? 16
         : 18;
 
   const riskItems = [
     {
-      label: "Weather Risk",
+      label: "Journey Weather Risk",
       value: weatherRisk,
-      description:
-        "Live conditions at shipment origin",
+      description: weather
+        ? `${weather.points.length} live weather checkpoints across the shipment corridor`
+        : "Analyze a shipment to load live corridor weather",
     },
     {
       label: "Route Risk",
@@ -612,14 +642,27 @@ function RiskIntelligenceView({
     },
   ];
 
-  function labelForRisk(value: number) {
-    if (value >= 70) return "CRITICAL";
-    if (value >= 40) return "HIGH";
-    if (value >= 20) return "MODERATE";
+  function labelForRisk(
+    value: number
+  ) {
+    if (value >= 70) {
+      return "CRITICAL";
+    }
+
+    if (value >= 40) {
+      return "HIGH";
+    }
+
+    if (value >= 20) {
+      return "MODERATE";
+    }
+
     return "LOW";
   }
 
-  function colorForRisk(value: number) {
+  function colorForRisk(
+    value: number
+  ) {
     if (value >= 70) {
       return {
         text: "text-red-600",
@@ -673,9 +716,9 @@ function RiskIntelligenceView({
 
             <p className="mt-2 max-w-xl text-sm text-slate-500">
               SupplyAI decomposes shipment
-              exposure across live weather,
-              routing, cargo, and operational
-              factors.
+              exposure across live corridor
+              weather, routing, cargo, and
+              operational factors.
             </p>
           </div>
 
@@ -696,7 +739,9 @@ function RiskIntelligenceView({
               <p
                 className={`pb-1 text-[10px] font-black uppercase ${overallColors.text}`}
               >
-                {labelForRisk(overallRisk)}
+                {labelForRisk(
+                  overallRisk
+                )}
               </p>
             </div>
           </div>
@@ -705,7 +750,9 @@ function RiskIntelligenceView({
         <div className="mt-7 grid gap-4 md:grid-cols-2">
           {riskItems.map((item) => {
             const colors =
-              colorForRisk(item.value);
+              colorForRisk(
+                item.value
+              );
 
             return (
               <div
@@ -719,7 +766,9 @@ function RiskIntelligenceView({
                     </p>
 
                     <p className="mt-1 text-xs text-slate-400">
-                      {item.description}
+                      {
+                        item.description
+                      }
                     </p>
                   </div>
 
@@ -733,7 +782,9 @@ function RiskIntelligenceView({
                     <p
                       className={`mt-1 text-[9px] font-black uppercase ${colors.text}`}
                     >
-                      {labelForRisk(item.value)}
+                      {labelForRisk(
+                        item.value
+                      )}
                     </p>
                   </div>
                 </div>
@@ -744,7 +795,10 @@ function RiskIntelligenceView({
                     style={{
                       width: `${Math.min(
                         100,
-                        Math.max(0, item.value)
+                        Math.max(
+                          0,
+                          item.value
+                        )
                       )}%`,
                     }}
                   />
@@ -753,6 +807,73 @@ function RiskIntelligenceView({
             );
           })}
         </div>
+
+        {weather && (
+          <div className="mt-4 border border-slate-200 bg-white p-5">
+            <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-400">
+                  Corridor Weather Analysis
+                </p>
+
+                <p className="mt-2 text-sm font-semibold text-slate-950">
+                  {weather.summary}
+                </p>
+              </div>
+
+              <div className="flex gap-6">
+                <div>
+                  <p className="text-[8px] font-black uppercase text-slate-400">
+                    Checkpoints
+                  </p>
+
+                  <p className="mt-1 text-lg font-black">
+                    {
+                      weather.points
+                        .length
+                    }
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[8px] font-black uppercase text-slate-400">
+                    Peak Risk
+                  </p>
+
+                  <p
+                    className={`mt-1 text-lg font-black ${colorForRisk(
+                      weather.highestRiskScore
+                    ).text}`}
+                  >
+                    {
+                      weather.highestRiskScore
+                    }
+                    %
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[8px] font-black uppercase text-slate-400">
+                    Peak Location
+                  </p>
+
+                  <p className="mt-1 text-lg font-black">
+                    {
+                      weather
+                        .highestRiskPoint
+                        .progressPercent
+                    }
+                    %
+                  </p>
+
+                  <p className="text-[8px] font-semibold uppercase text-slate-400">
+                    into route
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div
           className={`mt-6 border ${overallColors.border} ${overallColors.background} p-6`}
@@ -792,7 +913,8 @@ function RiskIntelligenceView({
               </p>
 
               <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                Selected from SupplyAI&apos;s
+                Selected from
+                SupplyAI&apos;s
                 alternative options.
               </p>
             </div>
@@ -861,7 +983,7 @@ export default function Home() {
   });
 
   const [weather, setWeather] =
-    useState<WeatherResult | null>(null);
+    useState<JourneyWeatherResult | null>(null);
 
   const [analyzing, setAnalyzing] =
     useState(false);
@@ -874,13 +996,18 @@ export default function Home() {
     setDisruptionActive,
   ] = useState(false);
 
+  const [
+    selectedRoute,
+    setSelectedRoute,
+  ] = useState<AlternativeOption | null>(null);
+
   const togglePanel = (panel: PanelName) => {
     setOpenPanel((current) =>
       current === panel ? null : panel
     );
   };
 
-  const estimate = useMemo(
+  const baseEstimate = useMemo(
     () =>
       calculateShipmentEstimate(
         originLocation,
@@ -897,6 +1024,25 @@ export default function Home() {
       disruptionActive,
     ]
   );
+
+  const estimate = useMemo<ShipmentEstimate>(() => {
+    if (!selectedRoute) {
+      return baseEstimate;
+    }
+
+    return {
+      ...baseEstimate,
+      etaDays: selectedRoute.etaDays,
+      estimatedCost: selectedRoute.cost,
+      overallRisk: selectedRoute.risk,
+      status:
+        selectedRoute.risk >= 70
+          ? "INTERVENTION"
+          : selectedRoute.risk >= 40
+            ? "MONITOR"
+            : "ON TRACK",
+    };
+  }, [baseEstimate, selectedRoute]);
 
   const alternativeOptions = useMemo(
     () =>
@@ -922,6 +1068,20 @@ export default function Home() {
       ),
     [alternativeOptions, disruptionActive]
   );
+
+  const selectAlternativeRoute = (
+    option: AlternativeOption
+  ) => {
+    setSelectedRoute(option);
+
+    if (option.modes.length === 1) {
+      setActiveTransport(option.modes[0]);
+    } else {
+      setActiveTransport(option.name);
+    }
+
+    setMapView("route");
+  };
 
   const costReview =
     estimate.estimatedCost >=
@@ -1014,29 +1174,27 @@ export default function Home() {
       const newDestination =
         destinationData.location as GeocodedLocation;
 
-      const directDistanceKm = calculateDistanceKm(
-        newOrigin,
-        newDestination
-      );
+      const directDistanceKm =
+        calculateDistanceKm(
+          newOrigin,
+          newDestination
+        );
 
-      // Prevent meaningless same-location shipments.
       if (directDistanceKm < 1) {
         throw new Error(
           "Origin and destination cannot be the same location. Please enter two different locations."
         );
       }
 
-      // Ground-only freight should not be used for extremely long
-      // international routes that would require another transport mode.
       if (
         transport === "Ground" &&
         directDistanceKm > 5000
       ) {
         throw new Error(
-          "Ground-only route unavailable. This shipment requires multiple transport modes. Please choose Ocean, Air, or Adaptive Multimodal."        );
+          "Ground-only route unavailable. This shipment requires multiple transport modes. Please choose Ocean, Air, or Adaptive Multimodal."
+        );
       }
 
-      // Ocean freight does not make sense for short/local shipments.
       if (
         transport === "Ocean" &&
         directDistanceKm < 300
@@ -1045,13 +1203,38 @@ export default function Home() {
           "Ocean freight is not suitable for this short-distance shipment. Please choose Ground freight."
         );
       }
-      const weatherResponse = await fetch(
-        `/api/weather?lat=${newOrigin.latitude}&lon=${newOrigin.longitude}`
-      );
+
+      /*
+       * JOURNEY-WIDE WEATHER
+       *
+       * Instead of sending only the origin,
+       * SupplyAI sends both ends of the
+       * shipment corridor.
+       */
+      const weatherParams =
+        new URLSearchParams({
+          originLat: String(
+            newOrigin.latitude
+          ),
+          originLon: String(
+            newOrigin.longitude
+          ),
+          destinationLat: String(
+            newDestination.latitude
+          ),
+          destinationLon: String(
+            newDestination.longitude
+          ),
+        });
+
+      const weatherResponse =
+        await fetch(
+          `/api/weather?${weatherParams.toString()}`
+        );
 
       if (!weatherResponse.ok) {
         throw new Error(
-          "Could not retrieve live weather."
+          "Could not retrieve journey weather."
         );
       }
 
@@ -1064,23 +1247,40 @@ export default function Home() {
       ) {
         throw new Error(
           weatherData.error ||
-          "Weather analysis failed."
+          "Journey weather analysis failed."
         );
       }
 
+      const journeyWeather =
+        weatherData.weather as JourneyWeatherResult;
+
       setOriginLocation(newOrigin);
-      setDestinationLocation(newDestination);
-      setWeather(weatherData.weather);
+      setDestinationLocation(
+        newDestination
+      );
+
+      setWeather(journeyWeather);
 
       setActiveOrigin(origin);
       setActiveDestination(destination);
       setActiveCargo(cargo);
-      if (transport === "Multimodal") {
+
+      /*
+       * A previously selected alternative
+       * should not survive a brand-new
+       * shipment analysis.
+       */
+      setSelectedRoute(null);
+
+      if (
+        transport === "Multimodal"
+      ) {
         const adaptiveOptions =
           calculateAlternativeOptions(
             newOrigin,
             newDestination,
-            weatherData.weather.riskScore ?? 0,
+            journeyWeather.riskScore ??
+            0,
             false
           );
 
@@ -1094,8 +1294,11 @@ export default function Home() {
           adaptiveRecommendation.name
         );
       } else {
-        setActiveTransport(transport);
+        setActiveTransport(
+          transport
+        );
       }
+
       setDisruptionActive(false);
       setMapView("route");
       setOpenPanel(null);
@@ -1115,6 +1318,7 @@ export default function Home() {
       setAnalyzing(false);
     }
   };
+
 
   const resetDemo = () => {
     setOrigin("Shenzhen, China");
@@ -1149,6 +1353,7 @@ export default function Home() {
     setAnalysisError("");
     setAnalyzing(false);
     setDisruptionActive(false);
+    setSelectedRoute(null);
     setMapView("route");
     setOpenPanel(null);
     setShowNewShipment(false);
@@ -1369,136 +1574,156 @@ export default function Home() {
         </section>
       )}
 
-      {/* SHIPMENT CONTEXT */}
+      {/* SHIPMENT CONTEXT + KPI STRIP */}
 
-      <div className="border-b border-slate-300 bg-white">
-        <div className="flex flex-col justify-between gap-4 px-7 py-5 md:flex-row md:items-end">
-          <div>
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+      <section className="border-b border-slate-300 bg-white">
+        <div className="flex flex-col gap-3 px-7 py-3 lg:flex-row lg:items-center lg:justify-between">
+
+          {/* SHIPMENT INFO */}
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-slate-400">
                 Control Tower
               </span>
+
               <span className="text-slate-300">
                 /
               </span>
-              <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-700">
+
+              <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-slate-700">
                 SHP-2048
               </span>
             </div>
 
-            <h2 className="text-3xl font-semibold tracking-[-0.04em]">
-              {activeOrigin} →{" "}
-              {activeDestination}
-            </h2>
+            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+              <h2 className="text-xl font-black tracking-[-0.03em] text-slate-950">
+                {activeOrigin} → {activeDestination}
+              </h2>
 
-            <p className="mt-1 text-sm text-slate-500">
-              {activeTransport} freight ·{" "}
-              {activeCargo}
-            </p>
+              <p className="text-[10px] font-semibold text-slate-500">
+                {activeTransport} · {activeCargo}
+              </p>
+
+              <span
+                className={`border px-2 py-1 text-[8px] font-black uppercase tracking-[0.1em] ${interventionRequired
+                    ? "border-red-200 bg-red-50 text-red-700"
+                    : costReview || estimate.overallRisk >= 40
+                      ? "border-amber-200 bg-amber-50 text-amber-700"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  }`}
+              >
+                {shipmentStatus}
+              </span>
+            </div>
           </div>
 
-          <span
-            className={`border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] ${interventionRequired
-              ? "border-red-200 bg-red-50 text-red-700"
-              : costReview ||
-                estimate.overallRisk >= 40
-                ? "border-amber-200 bg-amber-50 text-amber-700"
-                : "border-emerald-200 bg-emerald-50 text-emerald-700"
-              }`}
-          >
-            {shipmentStatus}
-          </span>
+          {/* KPI STRIP */}
+
+          <div className="grid shrink-0 grid-cols-4 divide-x divide-slate-200 border border-slate-200 bg-slate-50">
+            <div className="min-w-[125px] px-4 py-2">
+              <p className="text-[7px] font-black uppercase tracking-[0.14em] text-slate-400">
+                ETA
+              </p>
+
+              <p className="mt-0.5 text-base font-black text-slate-950">
+                {estimate.etaDays} days
+              </p>
+
+              <p className="text-[8px] text-slate-500">
+                {formatDistance(estimate.modeledDistanceKm)} km
+              </p>
+            </div>
+
+            <div className="min-w-[125px] px-4 py-2">
+              <p className="text-[7px] font-black uppercase tracking-[0.14em] text-slate-400">
+                Cost
+              </p>
+
+              <p
+                className={`mt-0.5 text-base font-black ${costReview
+                    ? "text-amber-600"
+                    : "text-slate-950"
+                  }`}
+              >
+                {formatCurrency(estimate.estimatedCost)}
+              </p>
+
+              <p className="text-[8px] text-slate-500">
+                Freight estimate
+              </p>
+            </div>
+
+            <div className="min-w-[125px] px-4 py-2">
+              <p className="text-[7px] font-black uppercase tracking-[0.14em] text-slate-400">
+                Route Risk
+              </p>
+
+              <p
+                className={`mt-0.5 text-base font-black ${riskColor(
+                  estimate.overallRisk
+                )}`}
+              >
+                {estimate.overallRisk}%
+              </p>
+
+              <p className="text-[8px] text-slate-500">
+                {weather
+                  ? `${weather.riskLevel} weather`
+                  : "Baseline model"}
+              </p>
+            </div>
+
+            <div className="min-w-[125px] px-4 py-2">
+              <p className="text-[7px] font-black uppercase tracking-[0.14em] text-slate-400">
+                Network
+              </p>
+
+              <p
+                className={`mt-0.5 text-base font-black ${interventionRequired
+                    ? "text-red-600"
+                    : "text-slate-950"
+                  }`}
+              >
+                {networkStatus}
+              </p>
+
+              <p className="text-[8px] text-slate-500">
+                {disruptionActive
+                  ? "Disruption active"
+                  : "Network monitored"}
+              </p>
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
 
       {/* ALERT */}
 
-      {(interventionRequired ||
-        costReview) && (
-          <section
-            className={`border-b px-7 py-4 ${interventionRequired
+      {(interventionRequired || costReview) && (
+        <section
+          className={`border-b px-7 py-2 ${interventionRequired
               ? "border-red-200 bg-red-50"
               : "border-amber-200 bg-amber-50"
-              }`}
-          >
-            <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
-              <div>
-                <p
-                  className={`text-[10px] font-bold uppercase tracking-[0.18em] ${interventionRequired
-                    ? "text-red-700"
-                    : "text-amber-700"
-                    }`}
-                >
-                  {interventionRequired
-                    ? "SupplyAI · Intervention Recommended"
-                    : "SupplyAI · Cost Review"}
-                </p>
+            }`}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-xs font-semibold">
+              {disruptionActive
+                ? `SupplyAI recommends ${recommendedOption.name}. Options re-ranked after simulated disruption.`
+                : `Estimated shipment cost exceeds the ${formatCurrency(
+                  COST_REVIEW_THRESHOLD
+                )} review threshold.`}
+            </p>
 
-                <p className="mt-1 text-sm font-semibold">
-                  {disruptionActive
-                    ? `SupplyAI recommends ${recommendedOption.name}. Options have been re-ranked after the simulated disruption.`
-                    : `Estimated shipment cost exceeds the ${formatCurrency(
-                      COST_REVIEW_THRESHOLD
-                    )} review threshold.`}
-                </p>
-              </div>
-
-              <div className="text-xs font-semibold text-slate-600">
-                Risk {estimate.overallRisk}% ·{" "}
-                {estimate.etaDays} days ·{" "}
-                {formatCurrency(
-                  estimate.estimatedCost
-                )}
-              </div>
+            <div className="shrink-0 text-[10px] font-bold text-slate-600">
+              Risk {estimate.overallRisk}% · {estimate.etaDays} days ·{" "}
+              {formatCurrency(estimate.estimatedCost)}
             </div>
-          </section>
-        )}
+          </div>
+        </section>
+      )}
 
-      {/* KPI STRIP */}
-
-      <section className="grid border-b border-slate-300 bg-white py-5 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat
-          label="Estimated ETA"
-          value={`${estimate.etaDays} days`}
-          subtext={`${formatDistance(
-            estimate.modeledDistanceKm
-          )} km modeled route`}
-          warning={disruptionActive}
-        />
-
-        <Stat
-          label="Estimated Cost"
-          value={formatCurrency(
-            estimate.estimatedCost
-          )}
-          subtext="SupplyAI freight estimate"
-          warning={costReview}
-        />
-
-        <Stat
-          label="Route Exposure"
-          value={`${estimate.overallRisk}%`}
-          subtext={
-            weather
-              ? `${weather.riskLevel} live weather + route model`
-              : "Modeled baseline risk"
-          }
-          warning={
-            estimate.overallRisk >= 40
-          }
-        />
-
-        <Stat
-          label="Network Status"
-          value={networkStatus}
-          subtext={
-            disruptionActive
-              ? "1 simulated disruption"
-              : "No active disruption scenario"
-          }
-          warning={interventionRequired}
-        />
-      </section>
 
       {/* MAIN WORKSPACE */}
 
@@ -1506,28 +1731,24 @@ export default function Home() {
         {/* ROUTE / RISK WORKSPACE */}
 
         <div className="relative min-h-[590px] border-r border-slate-300 bg-[#e8e7e1]">
-          <div className="absolute right-6 top-6 z-[1100] flex border border-slate-300 bg-white p-1 shadow-sm">
+          <div className="absolute right-6 top-6 z-[1100] flex gap-2 border border-slate-300 bg-white p-2 shadow-lg">
             <button
-              onClick={() =>
-                setMapView("route")
-              }
-              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${mapView === "route"
-                ? "bg-slate-950 text-white"
-                : "bg-white text-slate-500 hover:bg-slate-100"
+              type="button"
+              onClick={() => setMapView("route")}
+              className={`min-w-[125px] px-6 py-3.5 text-xs font-black uppercase tracking-[0.16em] transition ${mapView === "route"
+                ? "bg-slate-950 text-white shadow-sm"
+                : "bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-950"
                 }`}
             >
               Route
             </button>
 
             <button
-              onClick={() =>
-                setMapView("risk")
-              }
-              className={`px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] transition ${mapView === "risk"
-                ? disruptionActive
-                  ? "bg-red-600 text-white"
-                  : "bg-slate-950 text-white"
-                : "bg-white text-slate-500 hover:bg-slate-100"
+              type="button"
+              onClick={() => setMapView("risk")}
+              className={`min-w-[125px] px-6 py-3.5 text-xs font-black uppercase tracking-[0.16em] transition ${mapView === "risk"
+                ? "bg-red-600 text-white shadow-sm"
+                : "bg-white text-red-600 hover:bg-red-50"
                 }`}
             >
               Risk
@@ -1590,12 +1811,14 @@ export default function Home() {
               overallRisk={
                 estimate.overallRisk
               }
-              weatherRisk={
-                weather?.riskScore ?? 0
-              }
+              weather={weather}
               cargo={activeCargo}
-              transport={activeTransport}
-              disrupted={disruptionActive}
+              transport={
+                activeTransport
+              }
+              disrupted={
+                disruptionActive
+              }
               recommendation={
                 recommendedOption.name
               }
@@ -1726,7 +1949,7 @@ export default function Home() {
 
                 <p className="mt-1 text-[10px] text-slate-500">
                   {weather
-                    ? `${weather.riskLevel} live weather exposure`
+                    ? `${weather.riskLevel} journey weather exposure`
                     : "Modeled baseline exposure"}
                 </p>
               </div>
@@ -1751,36 +1974,87 @@ export default function Home() {
                       {weather.summary}
                     </p>
 
-                    <div className="mt-4 grid grid-cols-3 gap-2">
+                    <div className="mt-4 border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-400">
+                            Journey Weather
+                          </p>
+
+                          <p
+                            className={`mt-1 text-xl font-black ${riskColor(
+                              weather.riskScore
+                            )}`}
+                          >
+                            {
+                              weather.riskScore
+                            }
+                            %
+                          </p>
+                        </div>
+
+                        <div className="text-right">
+                          <p className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-400">
+                            Live Checkpoints
+                          </p>
+
+                          <p className="mt-1 text-xl font-black text-slate-950">
+                            {
+                              weather.points
+                                .length
+                            }
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-3 gap-2">
                       <div className="border border-slate-200 p-2">
                         <p className="text-[8px] font-bold uppercase text-slate-400">
-                          Temp
+                          Peak Risk
                         </p>
-                        <p className="mt-1 text-xs font-bold">
-                          {weather.temperature}
-                          °C
+
+                        <p
+                          className={`mt-1 text-xs font-black ${riskColor(
+                            weather.highestRiskScore
+                          )}`}
+                        >
+                          {
+                            weather.highestRiskScore
+                          }
+                          %
                         </p>
                       </div>
 
                       <div className="border border-slate-200 p-2">
                         <p className="text-[8px] font-bold uppercase text-slate-400">
-                          Wind
+                          Avg Risk
                         </p>
-                        <p className="mt-1 text-xs font-bold">
-                          {weather.windSpeed}{" "}
-                          km/h
-                        </p>
-                      </div>
 
-                      <div className="border border-slate-200 p-2">
-                        <p className="text-[8px] font-bold uppercase text-slate-400">
-                          Rain
-                        </p>
                         <p className="mt-1 text-xs font-bold">
                           {
-                            weather.precipitation
-                          }{" "}
-                          mm
+                            weather.averageRiskScore
+                          }
+                          %
+                        </p>
+                      </div>
+
+                      <div className="border border-slate-200 p-2">
+                        <p className="text-[8px] font-bold uppercase text-slate-400">
+                          Peak Point
+                        </p>
+
+                        <p className="mt-1 text-xs font-bold">
+                          {
+                            weather
+                              .highestRiskPoint
+                              .progressPercent
+                          }
+                          %
+                        </p>
+
+                        <p className="text-[7px] font-semibold uppercase text-slate-400">
+                          into route
                         </p>
                       </div>
                     </div>
@@ -1788,10 +2062,11 @@ export default function Home() {
                 ) : (
                   <p className="mt-2 text-xs leading-5 text-slate-500">
                     Analyze a shipment to load
-                    live weather intelligence.
+                    live weather intelligence
+                    across the full shipment
+                    corridor.
                   </p>
                 )}
-
                 {disruptionActive && (
                   <div className="mt-4 border border-red-200 bg-red-50 p-3">
                     <p className="text-[9px] font-black uppercase tracking-[0.15em] text-red-700">
@@ -1848,13 +2123,12 @@ export default function Home() {
                   Alternative Routes
                 </p>
 
-                <p className="mt-1 text-sm font-bold">
-                  {alternativeOptions.length}{" "}
-                  options analyzed
+                <p className="mt-1 text-xl font-black tracking-tight text-slate-950">
+                  {alternativeOptions.length} Route Alternatives
                 </p>
 
-                <p className="mt-1 text-[10px] text-slate-500">
-                  Compare ETA · cost · risk
+                <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">
+                  Ranked by risk · ETA · cost
                 </p>
               </div>
 
@@ -1870,17 +2144,23 @@ export default function Home() {
               "alternatives" && (
                 <div className="border-t border-slate-200 bg-white">
                   {alternativeOptions.map(
-                    (option) => {
+                    (option, index) => {
                       const recommended =
                         option.name ===
                         recommendedOption.name;
 
+                      const selected =
+                        selectedRoute?.name ===
+                        option.name;
+
                       return (
                         <div
-                          key={option.name}
-                          className={`border-b border-slate-100 p-4 last:border-b-0 ${recommended
-                            ? "border-l-4 border-l-emerald-500 bg-emerald-50/60"
-                            : "border-l-4 border-l-transparent"
+                          key={`${option.name}-${index}`}
+                          className={`border-b border-slate-100 p-4 transition last:border-b-0 ${selected
+                            ? "border-l-4 border-l-slate-950 bg-slate-100"
+                            : recommended
+                              ? "border-l-4 border-l-emerald-500 bg-emerald-50/60"
+                              : "border-l-4 border-l-transparent"
                             }`}
                         >
                           <div className="flex items-start justify-between gap-4">
@@ -1891,14 +2171,18 @@ export default function Home() {
                                 </p>
                               )}
 
+                              {selected && (
+                                <p className="mb-1 text-[8px] font-black uppercase tracking-[0.14em] text-slate-950">
+                                  Active Route
+                                </p>
+                              )}
+
                               <p className="text-xs font-bold">
                                 {option.name}
                               </p>
 
                               <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                                {
-                                  option.description
-                                }
+                                {option.description}
                               </p>
                             </div>
 
@@ -1915,15 +2199,32 @@ export default function Home() {
                             <span>
                               {option.etaDays} days
                             </span>
+
                             <span>
                               {formatCurrency(
                                 option.cost
                               )}
                             </span>
+
                             <span>
                               {option.risk}% risk
                             </span>
                           </div>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              selectAlternativeRoute(option)
+                            }
+                            className={`mt-3 w-full border px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] transition ${selected
+                              ? "border-slate-950 bg-slate-950 text-white"
+                              : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                              }`}
+                          >
+                            {selected
+                              ? "Active Route"
+                              : "Select Route"}
+                          </button>
                         </div>
                       );
                     }
@@ -2022,35 +2323,178 @@ export default function Home() {
 
           {/* DISRUPTION BUTTON */}
 
-          <div className="p-5">
-            <button
-              onClick={() => {
-                const activating =
-                  !disruptionActive;
+          {/* DISRUPTION HERO */}
 
-                setDisruptionActive(
-                  activating
-                );
+          <div
+            className={`m-5 border p-5 ${disruptionActive
+              ? "border-red-300 bg-red-50"
+              : "border-slate-300 bg-white"
+              }`}
+          >
+            {!disruptionActive ? (
+              <>
+                <p className="text-[9px] font-black uppercase tracking-[0.2em] text-red-600">
+                  Live Decision Demo
+                </p>
 
-                if (activating) {
-                  setOpenPanel("risk");
-                  setMapView("risk");
-                }
-              }}
-              className={`w-full px-4 py-3 text-xs font-black uppercase tracking-[0.1em] text-white transition ${disruptionActive
-                ? "bg-red-700 hover:bg-red-800"
-                : "bg-slate-950 hover:bg-slate-800"
-                }`}
-            >
-              {disruptionActive
-                ? "Clear Demo Disruption"
-                : "Introduce Disruption"}
-            </button>
+                <h3 className="mt-2 text-xl font-black tracking-tight text-slate-950">
+                  Test SupplyAI Under Disruption
+                </h3>
 
-            <p className="mt-2 text-center text-[9px] font-semibold uppercase tracking-wide text-slate-400">
-              Simulation control · not live
-              port data
-            </p>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  Introduce a simulated logistics disruption and watch SupplyAI
+                  recalculate risk, ETA, cost, and the recommended route.
+                </p>
+
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <div className="border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[8px] font-black uppercase tracking-wide text-slate-400">
+                      Current Risk
+                    </p>
+                    <p className="mt-1 text-lg font-black text-slate-950">
+                      {estimate.overallRisk}%
+                    </p>
+                  </div>
+
+                  <div className="border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[8px] font-black uppercase tracking-wide text-slate-400">
+                      Current ETA
+                    </p>
+                    <p className="mt-1 text-lg font-black text-slate-950">
+                      {estimate.etaDays}d
+                    </p>
+                  </div>
+
+                  <div className="border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[8px] font-black uppercase tracking-wide text-slate-400">
+                      Current Cost
+                    </p>
+                    <p className="mt-1 text-sm font-black text-slate-950">
+                      {formatCurrency(estimate.estimatedCost)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 border border-emerald-200 bg-emerald-50 p-3">
+                  <p className="text-[8px] font-black uppercase tracking-[0.14em] text-emerald-700">
+                    Current Recommendation
+                  </p>
+                  <p className="mt-1 text-sm font-black text-slate-950">
+                    {recommendedOption.name}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedRoute(null);
+                    setDisruptionActive(true);
+                    setOpenPanel("alternatives");
+                    setMapView("risk");
+                  }}
+                  className="mt-4 w-full bg-red-600 px-4 py-4 text-xs font-black uppercase tracking-[0.12em] text-white transition hover:bg-red-700"
+                >
+                  Simulate Disruption →
+                </button>
+
+                <p className="mt-2 text-center text-[9px] font-semibold uppercase tracking-wide text-slate-400">
+                  Demo simulation · not live disruption data
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[9px] font-black uppercase tracking-[0.2em] text-red-600">
+                      Disruption Detected
+                    </p>
+
+                    <h3 className="mt-1 text-lg font-black text-slate-950">
+                      Port Congestion + Downstream Logistics Delay
+                    </h3>
+
+                    <p className="mt-2 text-xs font-semibold leading-5 text-red-700">
+                      SupplyAI detected increased route exposure and recalculated all alternatives.
+                    </p>
+                  </div>
+
+                  <span className="bg-red-600 px-2 py-1 text-[8px] font-black uppercase tracking-wide text-white">
+                    Active
+                  </span>
+                </div>
+
+                <div className="mt-4 border-y border-red-200 py-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[9px] font-black uppercase tracking-[0.16em] text-red-600">
+                      After Disruption
+                    </p>
+
+                    <p className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-400">
+                      Recalculated
+                    </p>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <div className="bg-white p-3">
+                      <p className="text-[8px] font-black uppercase text-slate-400">
+                        Risk
+                      </p>
+                      <p className="mt-1 text-sm font-black text-red-600">
+                        {estimate.overallRisk}%
+                      </p>
+                    </div>
+
+                    <div className="bg-white p-3">
+                      <p className="text-[8px] font-black uppercase text-slate-400">
+                        ETA
+                      </p>
+                      <p className="mt-1 text-sm font-black text-red-600">
+                        {estimate.etaDays} days
+                      </p>
+                    </div>
+
+                    <div className="bg-white p-3">
+                      <p className="text-[8px] font-black uppercase text-slate-400">
+                        Cost
+                      </p>
+                      <p className="mt-1 text-sm font-black text-red-600">
+                        {formatCurrency(estimate.estimatedCost)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 bg-slate-950 p-4 text-white">
+                  <p className="text-[9px] font-black uppercase tracking-[0.18em] text-red-400">
+                    SupplyAI Recommendation
+                  </p>
+
+                  <p className="mt-2 text-xl font-black">
+                    → {recommendedOption.name}
+                  </p>
+
+                  <p className="mt-2 text-[10px] font-semibold text-slate-300">
+                    Best response based on updated risk, ETA, and cost.
+                  </p>
+
+                  <p className="mt-1 text-[10px] leading-4 text-slate-300">
+                    SupplyAI re-ranked {alternativeOptions.length} route alternatives using the new risk, ETA, and cost conditions.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDisruptionActive(false);
+                    setSelectedRoute(null);
+                    setMapView("route");
+                  }}
+                  className="mt-4 w-full border border-red-300 bg-white px-4 py-3 text-[10px] font-black uppercase tracking-[0.1em] text-red-700 transition hover:bg-red-100"
+                >
+                  Clear Disruption
+                </button>
+              </>
+            )}
           </div>
         </aside>
       </section>
